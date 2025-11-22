@@ -1,12 +1,12 @@
-free-proxy>=1.1.1
 # JobSpy Enhanced Scraper - Requirements
 # Core dependencies for the enhanced job scraper
 
-requests>=2.31.0
 beautifulsoup4>=4.12.2
-pandas>=2.1.0
-numpy>=1.26.3
-pydantic>=2.3.0
-tls-client>=1.0.1
+free-proxy>=1.1.1
 markdownify>=1.1.0
+numpy>=1.26.3
+pandas>=2.1.0
+pydantic>=2.3.0
 regex>=2024.4.28
+requests>=2.31.0
+tls-client>=1.0.1

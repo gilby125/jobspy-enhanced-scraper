@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime
 from typing import Tuple
@@ -94,13 +95,17 @@ class Indeed(Scraper):
             if self.scraper_input.search_term
             else ""
         )
+        # Build location parameter
+        # Indeed API requires radius and radiusUnit when using location parameter
+        # Use a large default radius (10000 miles) for country-wide searches when distance is None
+        location_str = ""
+        if self.scraper_input.location:
+            distance = self.scraper_input.distance if self.scraper_input.distance is not None else 10000
+            location_str = f'location: {{where: "{self.scraper_input.location}", radius: {distance}, radiusUnit: MILES}}'
+        
         query = job_search_query.format(
             what=(f'what: "{search_term}"' if search_term else ""),
-            location=(
-                f'location: {{where: "{self.scraper_input.location}", radius: {self.scraper_input.distance}, radiusUnit: MILES}}'
-                if self.scraper_input.location
-                else ""
-            ),
+            location=location_str,
             dateOnIndeed=self.scraper_input.hours_old,
             cursor=f'cursor: "{cursor}"' if cursor else "",
             filters=filters,
@@ -118,9 +123,16 @@ class Indeed(Scraper):
             verify=False,
         )
         if not response.ok:
-            log.info(
-                f"responded with status code: {response.status_code} (submit GitHub issue if this appears to be a bug)"
-            )
+            error_msg = f"responded with status code: {response.status_code}"
+            try:
+                error_data = response.json()
+                if "errors" in error_data:
+                    error_msg += f" - Errors: {error_data['errors']}"
+                elif "message" in error_data:
+                    error_msg += f" - Message: {error_data['message']}"
+            except:
+                error_msg += f" - Response: {response.text[:200]}"
+            log.info(f"{error_msg} (submit GitHub issue if this appears to be a bug)")
             return jobs, new_cursor
         data = response.json()
         jobs = data["data"]["jobSearch"]["results"]
@@ -177,11 +189,10 @@ class Indeed(Scraper):
                 keys.append("DSQF7")
 
             if keys:
-                keys_str = '", "'.join(keys)
                 filters.append({
                     "keyword": {
                         "field": "attributes",
-                        "keys": [keys_str]
+                        "keys": keys
                     }
                 })
         
@@ -283,3 +294,181 @@ class Indeed(Scraper):
                 else None
             ),
         )
+
+    def format_job_for_display(self, job: JobPost) -> dict:
+        """Format a job posting for readable output"""
+        output = {
+            "Title": job.title,
+            "Company": job.company_name,
+            "Location": job.location.display_location() if job.location else "N/A",
+            "Is Remote": "Yes" if job.is_remote else "No",
+            "Job Type": ", ".join([jt.value[0] for jt in job.job_type]) if job.job_type else "N/A",
+            "Date Posted": job.date_posted,
+            "Job URL (Indeed)": job.job_url,
+            "Direct Apply URL": job.job_url_direct or "Not available",
+            "Company URL": job.company_url or "Not available",
+            "Company Direct URL": job.company_url_direct or "Not available",
+        }
+        
+        # Add compensation if available
+        if job.compensation:
+            comp = job.compensation
+            salary_str = ""
+            if comp.min_amount and comp.max_amount:
+                salary_str = f"${comp.min_amount:,.0f} - ${comp.max_amount:,.0f}"
+            elif comp.min_amount:
+                salary_str = f"${comp.min_amount:,.0f}+"
+            elif comp.max_amount:
+                salary_str = f"Up to ${comp.max_amount:,.0f}"
+            
+            if salary_str:
+                output["Salary"] = f"{salary_str} {comp.currency} ({comp.interval.value if comp.interval else 'N/A'})"
+            else:
+                output["Salary"] = "Not specified"
+        else:
+            output["Salary"] = "Not specified"
+        
+        # Add company details if available
+        if job.company_industry:
+            output["Company Industry"] = job.company_industry
+        if job.company_num_employees:
+            output["Company Employees"] = job.company_num_employees
+        if job.company_revenue:
+            output["Company Revenue"] = job.company_revenue
+        
+        # Add description preview (first 200 chars)
+        if job.description:
+            desc_preview = job.description.replace('\n', ' ').strip()[:200]
+            output["Description Preview"] = desc_preview + "..." if len(job.description) > 200 else desc_preview
+        
+        return output
+
+    def format_jobs_for_json(self, jobs: list[JobPost]) -> list[dict]:
+        """Format jobs for JSON export with proper serialization"""
+        jobs_data = []
+        for job in jobs:
+            job_dict = job.model_dump()
+            # Convert location object to dict for better readability
+            if job.location:
+                # Handle country - it can be a Country enum, string, or None
+                country_value = None
+                if job.location.country:
+                    if isinstance(job.location.country, str):
+                        country_value = job.location.country
+                    else:
+                        # It's a Country enum
+                        country_value = job.location.country.value[0]
+                
+                job_dict['location'] = {
+                    'city': job.location.city,
+                    'state': job.location.state,
+                    'country': country_value,
+                    'display': job.location.display_location()
+                }
+            # Convert job_type list to list of strings for better readability
+            if job.job_type:
+                job_dict['job_type'] = [jt.value[0] for jt in job.job_type]
+            jobs_data.append(job_dict)
+        return jobs_data
+
+    def get_summary_statistics(self, jobs: list[JobPost]) -> dict:
+        """Generate summary statistics for the job results"""
+        if not jobs:
+            return {
+                "total_jobs": 0,
+                "jobs_with_direct_apply": 0,
+                "jobs_with_direct_apply_percent": 0.0,
+                "remote_jobs": 0,
+                "remote_jobs_percent": 0.0,
+                "jobs_with_salary": 0,
+                "jobs_with_salary_percent": 0.0,
+            }
+        
+        total = len(jobs)
+        jobs_with_direct_apply = sum(1 for job in jobs if job.job_url_direct)
+        remote_jobs = sum(1 for job in jobs if job.is_remote)
+        jobs_with_salary = sum(1 for job in jobs if job.compensation and (job.compensation.min_amount or job.compensation.max_amount))
+        
+        return {
+            "total_jobs": total,
+            "jobs_with_direct_apply": jobs_with_direct_apply,
+            "jobs_with_direct_apply_percent": (jobs_with_direct_apply / total * 100) if total > 0 else 0.0,
+            "remote_jobs": remote_jobs,
+            "remote_jobs_percent": (remote_jobs / total * 100) if total > 0 else 0.0,
+            "jobs_with_salary": jobs_with_salary,
+            "jobs_with_salary_percent": (jobs_with_salary / total * 100) if total > 0 else 0.0,
+        }
+
+    def format_direct_apply_urls(self, jobs: list[JobPost], title: str = "Direct Apply URLs") -> str:
+        """Format direct apply URLs for text file export"""
+        lines = [f"{title}\n", "=" * 80 + "\n\n"]
+        for idx, job in enumerate(jobs, 1):
+            if job.job_url_direct:
+                lines.append(f"{idx}. {job.title} - {job.company_name}\n")
+                lines.append(f"   {job.job_url_direct}\n\n")
+            else:
+                lines.append(f"{idx}. {job.title} - {job.company_name}\n")
+                lines.append(f"   (No direct apply URL - use Indeed URL: {job.job_url})\n\n")
+        return "".join(lines)
+
+    def display_results(self, jobs: list[JobPost], search_term: str = None) -> None:
+        """Display formatted job results to console"""
+        if not jobs:
+            print("No jobs found matching the criteria.")
+            return
+        
+        # Display each job
+        for idx, job in enumerate(jobs, 1):
+            print(f"\n{'='*80}")
+            print(f"Job #{idx}")
+            print(f"{'='*80}")
+            
+            job_output = self.format_job_for_display(job)
+            for key, value in job_output.items():
+                print(f"{key:25}: {value}")
+            
+            # Highlight direct apply URL
+            if job.job_url_direct:
+                print(f"\n{'='*40}")
+                print(f"DIRECT APPLY URL (redirects to company portal):")
+                print(f"{job.job_url_direct}")
+                print(f"{'='*40}")
+            else:
+                print(f"\n[WARNING] No direct apply URL available. Use Indeed URL: {job.job_url}")
+        
+        # Display summary statistics
+        stats = self.get_summary_statistics(jobs)
+        print(f"\n\n{'='*80}")
+        print("SUMMARY STATISTICS")
+        print(f"{'='*80}")
+        print(f"Total Jobs Found: {stats['total_jobs']}")
+        print(f"Jobs with Direct Apply URL: {stats['jobs_with_direct_apply']} ({stats['jobs_with_direct_apply_percent']:.1f}%)")
+        print(f"Remote Jobs: {stats['remote_jobs']} ({stats['remote_jobs_percent']:.1f}%)")
+        print(f"Jobs with Salary Information: {stats['jobs_with_salary']} ({stats['jobs_with_salary_percent']:.1f}%)")
+
+    def save_results(self, jobs: list[JobPost], output_prefix: str = "indeed_jobs") -> dict[str, str]:
+        """
+        Save job results to JSON and direct apply URLs to text file
+        Returns a dict with 'json_file' and 'txt_file' keys containing the file paths
+        """
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        json_file = f"{output_prefix}_{timestamp}.json"
+        txt_file = f"{output_prefix}_direct_apply_urls_{timestamp}.txt"
+        
+        # Save JSON
+        jobs_data = self.format_jobs_for_json(jobs)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(jobs_data, f, indent=2, default=str, ensure_ascii=False)
+        
+        # Save direct apply URLs
+        direct_apply_content = self.format_direct_apply_urls(
+            jobs,
+            title=f"Direct Apply URLs ({len(jobs)} jobs)"
+        )
+        with open(txt_file, 'w', encoding='utf-8') as f:
+            f.write(direct_apply_content)
+        
+        return {
+            'json_file': json_file,
+            'txt_file': txt_file
+        }
