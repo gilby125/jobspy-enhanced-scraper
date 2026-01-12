@@ -416,11 +416,11 @@ class LinkedIn(Scraper):
                 href_tag = job_card.find("a", class_="base-card__full-link")
                 if not (href_tag and "href" in href_tag.attrs):
                     continue
-                    href = href_tag.attrs["href"].split("?")[0]
-                    job_id = href.split("-")[-1]
-                    if job_id in seen_ids:
-                        continue
-                    seen_ids.add(job_id)
+                href = href_tag.attrs["href"].split("?")[0]
+                job_id = href.split("-")[-1]
+                if job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
                 page_job_cards.append((job_card, job_id))
 
             if page_job_cards:
